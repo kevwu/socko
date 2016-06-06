@@ -2,6 +2,7 @@ package socko
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/gorilla/websocket"
@@ -12,16 +13,18 @@ func ServeJS() {
 
 }
 
+// TODO: make clear the difference between a "message" and an "event".
+// Update code to use this terminology correctly
 type SockHandler struct {
 	events  map[string]SockHandlerFunc
-	onOpen  SockHandlerFunc
-	onClose SockHandlerFunc
+	onOpen  func()
+	onClose func()
 }
 
 // data that an event handler can get ahold of
 type SockEventData struct {
-	eventType string                 // type of event
-	msgData   map[string]interface{} // JSON data sent with the message
+	messageType    string                 // type of event
+	messageContent map[string]interface{} // JSON data sent with the message
 }
 
 // represents an individual connection
@@ -46,11 +49,11 @@ func (sh *SockHandler) OnEvent(event string, fn SockHandlerFunc) {
 }
 
 // runs when socket connection is open
-func (sh *SockHandler) OnOpen(fn SockHandlerFunc) {
+func (sh *SockHandler) OnOpen(fn func()) {
 	sh.onOpen = fn
 }
 
-func (sh *SockHandler) OnClose(fn SockHandlerFunc) {
+func (sh *SockHandler) OnClose(fn func()) {
 	sh.onClose = fn
 }
 
@@ -66,34 +69,72 @@ func (sh *SockHandler) HandleHTTP(w http.ResponseWriter, r *http.Request) {
 		panic("socko: Failed to upgrade connection to websocket. " + err.Error())
 	}
 
+	// _, msgText, err := conn.ReadMessage()
+	// // TODO: handle err
+	// if err != nil {
+	// 	break
+	// }
+
+	// msg, err := readMessageData(msgText)
+	// if err != nil {
+	// 	panic(err)
+	// 	return
+	// }
+
 	sh.onOpen()
 
 	for {
-		_, p, err = conn.ReadMessage() // message type is expected to be TextMessage
+		_, msgText, err := conn.ReadMessage() // message type is expected to be TextMessage
 		if err != nil {
 			if err == websocket.ErrCloseSent {
 				break
 			}
 		}
 
-		msg := map[string]string{}
-		err = json.Unmarshal(p, &msg)
+		msg, err := readMessageData(msgText)
 		if err != nil {
-			panic("socko: Malformed JSON. " + err.Error())
+			// TODO: log/report error
+			panic(err)
 			continue
 		}
 
-		var event string
+		messageType := msg.messageType
 
-		if event, keySet := msg["event"]; !keySet {
-			// received data doesn't have the event set
-			panic("socko: Received data is missing event value.")
-		}
-
-		if _, eventExists := sh.events[event]; eventExists {
-			sh.events[event]()
+		if _, eventExists := sh.events[messageType]; eventExists {
+			sh.events[messageType](msg)
 		}
 	}
 
 	sh.onClose()
+}
+
+// not the best function name, consider renaming
+// takes in the raw message string and returns a socket event data struct
+// with the message content and type fields set.
+func readMessageData(msgText []byte) (SockEventData, error) {
+	msg := map[string]string{}
+	err := json.Unmarshal(msgText, &msg)
+	if err != nil {
+		var empty SockEventData
+		return empty, errors.New("Malformed JSON: " + err.Error())
+	}
+
+	if _, keySet := msg["type"]; !keySet {
+		// received data doesn't have the event set
+		var empty SockEventData
+		return empty, errors.New("Received data is missing message type.")
+	}
+
+	var messageContent map[string]interface{}
+	if _, keySet := msg["content"]; !keySet {
+		var empty SockEventData
+		return empty, errors.New("Received data is missing message content.")
+	}
+
+	err = json.Unmarshal([]byte(msg["content"]), &messageContent)
+
+	return SockEventData{
+		messageType:    msg["type"],
+		messageContent: messageContent,
+	}, nil
 }
